@@ -1,16 +1,23 @@
 package application
 
 import (
+	"archive/zip"
 	"fmt"
 	. "github.com/cloudfoundry/cli/cf/i18n"
+	"github.com/cloudfoundry/gofileutils/fileutils"
+	"io"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 
 	"github.com/cloudfoundry/cli/cf/actors"
 	"github.com/cloudfoundry/cli/cf/api"
+	"github.com/cloudfoundry/cli/cf/api/application_bits"
 	"github.com/cloudfoundry/cli/cf/api/authentication"
+	"github.com/cloudfoundry/cli/cf/api/resources"
+	"github.com/cloudfoundry/cli/cf/app_files"
 	"github.com/cloudfoundry/cli/cf/command_metadata"
 	"github.com/cloudfoundry/cli/cf/commands/service"
 	"github.com/cloudfoundry/cli/cf/configuration"
@@ -37,16 +44,17 @@ type Push struct {
 	routeRepo     api.RouteRepository
 	serviceRepo   api.ServiceRepository
 	stackRepo     api.StackRepository
-	appBitsRepo   api.ApplicationBitsRepository
+	appBitsRepo   application_bits.ApplicationBitsRepository
 	authRepo      authentication.AuthenticationRepository
 	wordGenerator words.WordGenerator
+	zipper        app_files.Zipper
 }
 
 func NewPush(ui terminal.UI, config configuration.Reader, manifestRepo manifest.ManifestRepository,
 	starter ApplicationStarter, stopper ApplicationStopper, binder service.ServiceBinder,
 	appRepo api.ApplicationRepository, domainRepo api.DomainRepository, routeRepo api.RouteRepository,
-	stackRepo api.StackRepository, serviceRepo api.ServiceRepository, appBitsRepo api.ApplicationBitsRepository,
-	authRepo authentication.AuthenticationRepository, wordGenerator words.WordGenerator) *Push {
+	stackRepo api.StackRepository, serviceRepo api.ServiceRepository, appBitsRepo application_bits.ApplicationBitsRepository,
+	authRepo authentication.AuthenticationRepository, wordGenerator words.WordGenerator, zipper app_files.Zipper) *Push {
 	return &Push{
 		ui:            ui,
 		config:        config,
@@ -62,6 +70,7 @@ func NewPush(ui terminal.UI, config configuration.Reader, manifestRepo manifest.
 		appBitsRepo:   appBitsRepo,
 		authRepo:      authRepo,
 		wordGenerator: wordGenerator,
+		zipper:        zipper,
 	}
 }
 
@@ -126,7 +135,7 @@ func (cmd *Push) Run(c *cli.Context) {
 		cmd.ui.Say(T("Uploading {{.AppName}}...",
 			map[string]interface{}{"AppName": terminal.EntityNameColor(app.Name)}))
 
-		apiErr := cmd.appBitsRepo.UploadApp(app.Guid, *appParams.Path, cmd.describeUploadOperation)
+		apiErr := cmd.uploadApp(app.Guid, *appParams.Path)
 		if apiErr != nil {
 			cmd.ui.Failed(fmt.Sprintf(T("Error uploading application.\n{{.ApiErr}}",
 				map[string]interface{}{"ApiErr": apiErr.Error()})))
@@ -540,4 +549,178 @@ func (cmd *Push) getAppParamsFromContext(c *cli.Context) (appParams models.AppPa
 	}
 
 	return
+}
+
+func (cmd *Push) uploadApp(appGuid string, appDir string) (apiErr error) {
+	fileutils.TempDir("apps", func(uploadDir string, err error) {
+		if err != nil {
+			apiErr = err
+			return
+		}
+
+		var presentFiles []resources.AppFileResource
+		cmd.sourceDir(appDir, func(sourceDir string, sourceErr error) {
+			if sourceErr != nil {
+				err = sourceErr
+				return
+			}
+			presentFiles, err = cmd.copyUploadableFiles(sourceDir, uploadDir)
+			if err != nil {
+				return
+			}
+
+			// copy cfignore if present
+			fileutils.CopyPathToPath(filepath.Join(sourceDir, ".cfignore"), filepath.Join(uploadDir, ".cfignore"))
+		})
+
+		if err != nil {
+			apiErr = err
+			return
+		}
+
+		fileutils.TempFile("uploads", func(zipFile *os.File, err error) {
+			if err != nil {
+				apiErr = err
+				return
+			}
+
+			zipFileSize := int64(0)
+			zipFileCount := int64(0)
+
+			err = cmd.zipper.Zip(uploadDir, zipFile)
+			switch err := err.(type) {
+			case nil:
+				stat, err := zipFile.Stat()
+				if err != nil {
+					apiErr = errors.NewWithError(T("Error zipping application"), err)
+					return
+				}
+
+				zipFileSize = int64(stat.Size())
+				zipFileCount = app_files.CountFiles(uploadDir)
+			case *errors.EmptyDirError:
+				zipFile = nil
+			default:
+				apiErr = errors.NewWithError(T("Error zipping application"), err)
+				return
+			}
+
+			cmd.describeUploadOperation(appDir, zipFileSize, zipFileCount)
+
+			apiErr = cmd.appBitsRepo.UploadBits(appGuid, zipFile, presentFiles)
+			if apiErr != nil {
+				return
+			}
+		})
+	})
+	return
+}
+
+func (cmd *Push) sourceDir(appDir string, cb func(sourceDir string, err error)) {
+	// If appDir is a zip, first extract it to a temporary directory
+	if cmd.zipper.IsZipFile(appDir) {
+		fileutils.TempDir("unzipped-app", func(tmpDir string, err error) {
+			err = cmd.extractZip(appDir, tmpDir)
+			cb(tmpDir, err)
+		})
+	} else {
+		cb(appDir, nil)
+	}
+}
+
+func (cmd *Push) copyUploadableFiles(appDir string, uploadDir string) (presentFiles []resources.AppFileResource, err error) {
+	// Find which files need to be uploaded
+	allAppFiles, err := app_files.AppFilesInDir(appDir)
+	if err != nil {
+		return
+	}
+
+	appFilesToUpload, presentFiles, apiErr := cmd.getFilesToUpload(allAppFiles)
+	if apiErr != nil {
+		err = errors.New(apiErr.Error())
+		return
+	}
+
+	// Copy files into a temporary directory and return it
+	err = app_files.CopyFiles(appFilesToUpload, appDir, uploadDir)
+	if err != nil {
+		return
+	}
+
+	return
+}
+
+func (repo *Push) extractZip(appDir, destDir string) (err error) {
+	r, err := zip.OpenReader(appDir)
+	if err != nil {
+		return
+	}
+	defer r.Close()
+
+	for _, f := range r.File {
+		func() {
+			// Don't try to extract directories
+			if f.FileInfo().IsDir() {
+				return
+			}
+
+			var rc io.ReadCloser
+			rc, err = f.Open()
+			if err != nil {
+				return
+			}
+
+			// functional scope from above is important
+			// otherwise this only closes the last file handle
+			defer rc.Close()
+
+			destFilePath := filepath.Join(destDir, f.Name)
+
+			err = fileutils.CopyReaderToPath(rc, destFilePath)
+			if err != nil {
+				return
+			}
+
+			err = os.Chmod(destFilePath, f.FileInfo().Mode())
+			if err != nil {
+				return
+			}
+		}()
+	}
+
+	return
+}
+
+func (cmd *Push) getFilesToUpload(allAppFiles []models.AppFileFields) (appFilesToUpload []models.AppFileFields, presentFiles []resources.AppFileResource, apiErr error) {
+	appFilesRequest := []resources.AppFileResource{}
+	for _, file := range allAppFiles {
+		appFilesRequest = append(appFilesRequest, resources.AppFileResource{
+			Path: file.Path,
+			Sha1: file.Sha1,
+			Size: file.Size,
+		})
+	}
+
+	appFilesToUpload = make([]models.AppFileFields, len(allAppFiles))
+	copy(appFilesToUpload, allAppFiles)
+	for _, file := range presentFiles {
+		appFile := models.AppFileFields{
+			Path: file.Path,
+			Sha1: file.Sha1,
+			Size: file.Size,
+		}
+		appFilesToUpload = cmd.deleteAppFile(appFilesToUpload, appFile)
+	}
+
+	return
+}
+
+func (cmd *Push) deleteAppFile(appFiles []models.AppFileFields, targetFile models.AppFileFields) []models.AppFileFields {
+	for i, file := range appFiles {
+		if file.Path == targetFile.Path {
+			appFiles[i] = appFiles[len(appFiles)-1]
+			return appFiles[:len(appFiles)-1]
+		}
+	}
+	return appFiles
 }
