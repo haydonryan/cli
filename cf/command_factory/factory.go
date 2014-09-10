@@ -187,10 +187,11 @@ func NewFactory(ui terminal.UI, config configuration.ReadWriter, manifestRepo ma
 		repoLocator.GetRouteRepository(),
 		repoLocator.GetStackRepository(),
 		repoLocator.GetServiceRepository(),
-		repoLocator.GetApplicationBitsRepository(),
 		repoLocator.GetAuthenticationRepository(),
 		words.NewWordGenerator(),
-		app_files.ApplicationZipper{})
+		actors.NewPushActor(repoLocator.GetApplicationBitsRepository(), app_files.ApplicationZipper{}, app_files.ApplicationFiles{}),
+		app_files.ApplicationZipper{},
+		app_files.ApplicationFiles{})
 
 	factory.cmdsByName["scale"] = application.NewScale(ui, config, restart, repoLocator.GetApplicationRepository())
 

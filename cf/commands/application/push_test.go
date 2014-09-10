@@ -5,9 +5,10 @@ import (
 	"path/filepath"
 	"syscall"
 
-	testapp_bits "github.com/cloudfoundry/cli/cf/api/application_bits/fakes"
+	fakeactors "github.com/cloudfoundry/cli/cf/actors/fakes"
 	testapi "github.com/cloudfoundry/cli/cf/api/fakes"
-	"github.com/cloudfoundry/cli/cf/app_files"
+	"github.com/cloudfoundry/cli/cf/api/resources"
+	fakeappfiles "github.com/cloudfoundry/cli/cf/app_files/fakes"
 	. "github.com/cloudfoundry/cli/cf/commands/application"
 	"github.com/cloudfoundry/cli/cf/configuration"
 	"github.com/cloudfoundry/cli/cf/errors"
@@ -41,11 +42,13 @@ var _ = Describe("Push Command", func() {
 		domainRepo          *testapi.FakeDomainRepository
 		routeRepo           *testapi.FakeRouteRepository
 		stackRepo           *testapi.FakeStackRepository
-		appBitsRepo         *testapp_bits.FakeApplicationBitsRepository
 		serviceRepo         *testapi.FakeServiceRepo
 		wordGenerator       words.WordGenerator
 		requirementsFactory *testreq.FakeReqFactory
 		authRepo            *testapi.FakeAuthenticationRepository
+		actor               *fakeactors.FakePushActor
+		app_files           *fakeappfiles.FakeAppFiles
+		zipper              *fakeappfiles.FakeZipper
 	)
 
 	BeforeEach(func() {
@@ -61,7 +64,6 @@ var _ = Describe("Push Command", func() {
 
 		routeRepo = &testapi.FakeRouteRepository{}
 		stackRepo = &testapi.FakeStackRepository{}
-		appBitsRepo = &testapp_bits.FakeApplicationBitsRepository{}
 		serviceRepo = &testapi.FakeServiceRepo{}
 		authRepo = &testapi.FakeAuthenticationRepository{}
 		wordGenerator = testwords.NewFakeWordGenerator("laughing-cow")
@@ -71,7 +73,9 @@ var _ = Describe("Push Command", func() {
 
 		requirementsFactory = &testreq.FakeReqFactory{LoginSuccess: true, TargetedSpaceSuccess: true}
 
-		zipper := app_files.ApplicationZipper{}
+		zipper = &fakeappfiles.FakeZipper{}
+		app_files = &fakeappfiles.FakeAppFiles{}
+		actor = &fakeactors.FakePushActor{}
 
 		cmd = NewPush(ui, configRepo, manifestRepo, starter, stopper, serviceBinder,
 			appRepo,
@@ -79,10 +83,11 @@ var _ = Describe("Push Command", func() {
 			routeRepo,
 			stackRepo,
 			serviceRepo,
-			appBitsRepo,
 			authRepo,
 			wordGenerator,
-			zipper)
+			actor,
+			zipper,
+			app_files)
 	})
 
 	callPush := func(args ...string) {
@@ -119,6 +124,11 @@ var _ = Describe("Push Command", func() {
 	Describe("when pushing a new app", func() {
 		BeforeEach(func() {
 			appRepo.ReadReturns.Error = errors.NewModelNotFoundError("App", "the-app")
+
+			zipper.ZipReturns(nil)
+			zipper.GetZipSizeReturns(9001, nil)
+			actor.GatherFilesReturns(nil, nil)
+			actor.UploadAppReturns(nil)
 		})
 
 		Context("when the default route for the app already exists", func() {
@@ -176,6 +186,7 @@ var _ = Describe("Push Command", func() {
 
 			It("creates an app", func() {
 				callPush("-t", "111", "my-new-app")
+				Expect(ui.Outputs).ToNot(ContainSubstrings([]string{"FAILED"}))
 
 				Expect(*appRepo.CreatedAppParams().Name).To(Equal("my-new-app"))
 				Expect(*appRepo.CreatedAppParams().SpaceGuid).To(Equal("my-space-guid"))
@@ -186,7 +197,7 @@ var _ = Describe("Push Command", func() {
 				Expect(routeRepo.BoundAppGuid).To(Equal("my-new-app-guid"))
 				Expect(routeRepo.BoundRouteGuid).To(Equal("my-new-app-route-guid"))
 
-				appGuid, _, _ := appBitsRepo.UploadBitsArgsForCall(0)
+				appGuid, _, _ := actor.UploadAppArgsForCall(0)
 				Expect(appGuid).To(Equal("my-new-app-guid"))
 
 				Expect(ui.Outputs).To(ContainSubstrings(
@@ -275,7 +286,7 @@ var _ = Describe("Push Command", func() {
 				Expect(routeRepo.BoundAppGuid).To(Equal("my-new-app-guid"))
 				Expect(routeRepo.BoundRouteGuid).To(Equal("my-hostname-route-guid"))
 
-				appGuid, _, _ := appBitsRepo.UploadBitsArgsForCall(0)
+				appGuid, _, _ := actor.UploadAppArgsForCall(0)
 				Expect(appGuid).To(Equal("my-new-app-guid"))
 
 				Expect(starter.AppToStart.Name).To(Equal(""))
@@ -373,15 +384,19 @@ var _ = Describe("Push Command", func() {
 				})
 			})
 
-			PIt("pushes the contents of the directory specified using the -p flag", func() {
-				//callPush("-p", "../some/path-to/an-app", "app-with-path")
-				//Expect(appBitsRepo.UploadedDir).To(Equal("../some/path-to/an-app"))
+			It("pushes the contents of the directory specified using the -p flag", func() {
+				callPush("-p", "../some/path-to/an-app", "app-with-path")
+
+				appDir, _ := actor.GatherFilesArgsForCall(0)
+				Expect(appDir).To(Equal("../some/path-to/an-app"))
 			})
 
-			PIt("pushes the contents of the current working directory by default", func() {
-				//		callPush("app-with-default-path")
-				//  	dir, _ := os.Getwd()
-				//		Expect(appBitsRepo.UploadedDir).To(Equal(dir))
+			It("pushes the contents of the current working directory by default", func() {
+				callPush("app-with-default-path")
+				dir, _ := os.Getwd()
+
+				appDir, _ := actor.GatherFilesArgsForCall(0)
+				Expect(appDir).To(Equal(dir))
 			})
 
 			It("fails when given a bad manifest path", func() {
@@ -459,7 +474,7 @@ var _ = Describe("Push Command", func() {
 				Expect(*appRepo.CreatedAppParams().StackName).To(Equal("custom-stack"))
 				Expect(*appRepo.CreatedAppParams().BuildpackUrl).To(Equal("some-buildpack"))
 				Expect(*appRepo.CreatedAppParams().Command).To(Equal("JAVA_HOME=$PWD/.openjdk JAVA_OPTS=\"-Xss995K\" ./bin/start.sh run"))
-				// Expect(appBitsRepo.UploadedDir).To(Equal(filepath.Clean("some/path/from/manifest"))) TODO: Re-enable this once we develop a strategy
+				// Expect(actor.UploadedDir).To(Equal(filepath.Clean("some/path/from/manifest"))) TODO: Re-enable this once we develop a strategy
 
 				Expect(*appRepo.CreatedAppParams().EnvironmentVars).To(Equal(map[string]string{
 					"PATH": "/u/apps/my-app/bin",
@@ -631,7 +646,7 @@ var _ = Describe("Push Command", func() {
 			callPush("existing-app")
 
 			Expect(stopper.AppToStop.Guid).To(Equal(existingApp.Guid))
-			appGuid, _, _ := appBitsRepo.UploadBitsArgsForCall(0)
+			appGuid, _, _ := actor.UploadAppArgsForCall(0)
 			Expect(appGuid).To(Equal(existingApp.Guid))
 		})
 
@@ -721,7 +736,7 @@ var _ = Describe("Push Command", func() {
 					It("does not add a route to the app", func() {
 						callPush("existing-app")
 
-						appGuid, _, _ := appBitsRepo.UploadBitsArgsForCall(0)
+						appGuid, _, _ := actor.UploadAppArgsForCall(0)
 						Expect(appGuid).To(Equal("existing-app-guid"))
 						Expect(domainRepo.FindByNameInOrgName).To(Equal(""))
 						Expect(routeRepo.FindByHostAndDomainCalledWith.Domain.Name).To(Equal(""))
@@ -791,7 +806,7 @@ var _ = Describe("Push Command", func() {
 			It("removes the route when the --no-route flag is given", func() {
 				callPush("--no-route", "existing-app")
 
-				appGuid, _, _ := appBitsRepo.UploadBitsArgsForCall(0)
+				appGuid, _, _ := actor.UploadAppArgsForCall(0)
 				Expect(appGuid).To(Equal("existing-app-guid"))
 				Expect(domainRepo.FindByNameInOrgName).To(Equal(""))
 				Expect(routeRepo.FindByHostAndDomainCalledWith.Domain.Name).To(Equal(""))
@@ -913,33 +928,34 @@ var _ = Describe("Push Command", func() {
 	})
 
 	Describe("displaying information about files being uploaded", func() {
-		PIt("displays information about the files being uploaded", func() {
-			// appRepo.ReadReturns.Error = errors.NewModelNotFoundError("App", "the-app")
-			// appBitsRepo.CallbackPath = "path/to/app"
-			// appBitsRepo.CallbackZipSize = 61 * 1024 * 1024
-			// appBitsRepo.CallbackFileCount = 11
+		It("displays information about the files being uploaded", func() {
+			app_files.CountFilesReturns(11)
+			zipper.ZipReturns(nil)
+			zipper.GetZipSizeReturns(6100000, nil)
+			actor.GatherFilesReturns([]resources.AppFileResource{resources.AppFileResource{Path: "path/to/app"}, resources.AppFileResource{Path: "bar"}}, nil)
 
-			// callPush("appName")
-			// Expect(ui.Outputs).To(ContainSubstrings(
-			// 	[]string{"Uploading", "path/to/app"},
-			// 	[]string{"61M", "11 files"},
-			// ))
+			curDir, err := os.Getwd()
+			Expect(err).NotTo(HaveOccurred())
+
+			callPush("appName")
+			Expect(ui.Outputs).To(ContainSubstrings(
+				[]string{"Uploading", curDir},
+				[]string{"5.8M", "11 files"},
+			))
 		})
 
-		PIt("omits the size when there are no files being uploaded", func() {
-			// appRepo.ReadReturns.Error = errors.NewModelNotFoundError("App", "the-app")
-			// appBitsRepo.CallbackPath = "path/to/app"
-			// appBitsRepo.CallbackFileCount = 0
+		It("omits the size when there are no files being uploaded", func() {
+			app_files.CountFilesReturns(0)
 
-			// callPush("appName")
-			// Expect(ui.WarnOutputs).To(ContainSubstrings(
-			// 	[]string{"None of your application files have changed", "Nothing will be uploaded"},
-			// ))
+			callPush("appName")
+			Expect(ui.WarnOutputs).To(ContainSubstrings(
+				[]string{"None of your application files have changed", "Nothing will be uploaded"},
+			))
 		})
 	})
 
 	It("fails when the app can't be uploaded", func() {
-		appBitsRepo.UploadBitsReturns(errors.New("Boom!"))
+		actor.UploadAppReturns(errors.New("Boom!"))
 
 		callPush("app")
 

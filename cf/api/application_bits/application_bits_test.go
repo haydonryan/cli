@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -14,13 +15,12 @@ import (
 
 	testapi "github.com/cloudfoundry/cli/cf/api/fakes"
 	"github.com/cloudfoundry/cli/cf/api/resources"
-	"github.com/cloudfoundry/cli/cf/app_files"
+	"github.com/cloudfoundry/cli/cf/configuration"
 	"github.com/cloudfoundry/cli/cf/net"
 	testconfig "github.com/cloudfoundry/cli/testhelpers/configuration"
 	testnet "github.com/cloudfoundry/cli/testhelpers/net"
 
 	. "github.com/cloudfoundry/cli/cf/api/application_bits"
-	. "github.com/cloudfoundry/cli/testhelpers/matchers"
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 )
@@ -28,46 +28,56 @@ import (
 var _ = Describe("CloudControllerApplicationBitsRepository", func() {
 	var (
 		fixturesDir string
+		repo        ApplicationBitsRepository
+		file1       resources.AppFileResource
+		file2       resources.AppFileResource
+		file3       resources.AppFileResource
+		file4       resources.AppFileResource
+		testHandler *testnet.TestHandler
+		testServer  *httptest.Server
+		configRepo  configuration.ReadWriter
 	)
 
 	BeforeEach(func() {
 		cwd, err := os.Getwd()
 		Expect(err).NotTo(HaveOccurred())
 		fixturesDir = filepath.Join(cwd, "../../../fixtures/applications")
-	})
 
-	var testUploadBits = func(requests ...testnet.TestRequest) (apiErr error) {
-		ts, handler := testnet.NewServer(requests)
-		defer ts.Close()
+		configRepo = testconfig.NewRepositoryWithDefaults()
 
-		configRepo := testconfig.NewRepositoryWithDefaults()
-		configRepo.SetApiEndpoint(ts.URL)
 		gateway := net.NewCloudControllerGateway((configRepo), time.Now)
 		gateway.PollingThrottle = time.Duration(0)
 
-		repo := NewCloudControllerApplicationBitsRepository(configRepo, gateway)
-		file, err := os.Open(filepath.Join(fixturesDir, "ignored_and_resource_matched_example_app.zip"))
-		if err != nil {
-			log.Fatal(err)
-		}
+		repo = NewCloudControllerApplicationBitsRepository(configRepo, gateway)
 
-		file1 := resources.AppFileResource{Path: "app.rb", Sha1: "2474735f5163ba7612ef641f438f4b5bee00127b", Size: 51}
-		file2 := resources.AppFileResource{Path: "config.ru", Sha1: "f097424ce1fa66c6cb9f5e8a18c317376ec12e05", Size: 70}
-		apiErr = repo.UploadBits("my-cool-app-guid", file, []resources.AppFileResource{file1, file2})
-
-		Expect(handler).To(HaveAllRequestsCalled())
-		return
-	}
-
-	It("uploads zip files", func() {
-		apiErr := testUploadBits(defaultRequests...)
-
-		Expect(apiErr).NotTo(HaveOccurred())
+		file1 = resources.AppFileResource{Path: "app.rb", Sha1: "2474735f5163ba7612ef641f438f4b5bee00127b", Size: 51}
+		file2 = resources.AppFileResource{Path: "config.ru", Sha1: "f097424ce1fa66c6cb9f5e8a18c317376ec12e05", Size: 70}
+		file3 = resources.AppFileResource{Path: "Gemfile", Sha1: "d9c3a51de5c89c11331d3b90b972789f1a14699a", Size: 59}
+		file4 = resources.AppFileResource{Path: "Gemfile.lock", Sha1: "345f999aef9070fb9a608e65cf221b7038156b6d", Size: 229}
 	})
 
-	It("returns a failure when uploading bits fails", func() {
-		apiErr := testUploadBits([]testnet.TestRequest{
-			testapi.NewCloudControllerTestRequest(testnet.TestRequest{
+	setupTestServer := func(reqs ...testnet.TestRequest) {
+		testServer, testHandler = testnet.NewServer(reqs)
+		configRepo.SetApiEndpoint(testServer.URL)
+	}
+
+	Describe(".UploadBits", func() {
+		var uploadFile *os.File
+		var err error
+
+		BeforeEach(func() {
+			uploadFile, err = os.Open(filepath.Join(fixturesDir, "ignored_and_resource_matched_example_app.zip"))
+			if err != nil {
+				log.Fatal(err)
+			}
+		})
+
+		AfterEach(func() {
+			testServer.Close()
+		})
+
+		It("uploads zip files", func() {
+			setupTestServer(testapi.NewCloudControllerTestRequest(testnet.TestRequest{
 				Method:  "PUT",
 				Path:    "/v2/apps/my-cool-app-guid/bits",
 				Matcher: uploadBodyMatcher(defaultZipCheck),
@@ -80,124 +90,49 @@ var _ = Describe("CloudControllerApplicationBitsRepository", func() {
 							"url": "/v2/jobs/my-job-guid"
 						}
 					}`,
-				}}),
-			createProgressEndpoint("running"),
-			createProgressEndpoint("failed"),
-		}...)
+				},
+			}),
+				createProgressEndpoint("running"),
+				createProgressEndpoint("finished"),
+			)
 
-		Expect(apiErr).To(HaveOccurred())
+			apiErr := repo.UploadBits("my-cool-app-guid", uploadFile, []resources.AppFileResource{file1, file2})
+			Expect(apiErr).NotTo(HaveOccurred())
+		})
+
+		It("returns a failure when uploading bits fails", func() {
+			setupTestServer(testapi.NewCloudControllerTestRequest(testnet.TestRequest{
+				Method:  "PUT",
+				Path:    "/v2/apps/my-cool-app-guid/bits",
+				Matcher: uploadBodyMatcher(defaultZipCheck),
+				Response: testnet.TestResponse{
+					Status: http.StatusCreated,
+					Body: `
+					{
+						"metadata":{
+							"guid": "my-job-guid",
+							"url": "/v2/jobs/my-job-guid"
+						}
+					}`,
+				},
+			}),
+				createProgressEndpoint("running"),
+				createProgressEndpoint("failed"),
+			)
+			apiErr := repo.UploadBits("my-cool-app-guid", uploadFile, []resources.AppFileResource{file1, file2})
+
+			Expect(apiErr).To(HaveOccurred())
+		})
 	})
 
-	// PIt("returns an error when the directory to upload does not exist", func() {
-	// config := testconfig.NewRepository()
-	// gateway := net.NewCloudControllerGateway((config), time.Now)
-	// zipper := &app_files.ApplicationZipper{}
-
-	// repo := NewCloudControllerApplicationBitsRepository(config, gateway)
-
-	// apiErr := repo.UploadApp("app-guid", "/foo/bar", func(_ string, _, _ int64) {})
-	// Expect(apiErr).To(HaveOccurred())
-	// Expect(apiErr.Error()).To(ContainSubstring(filepath.Join("foo", "bar")))
-	// })
-
-	// Context("when uploading a directory", func() {
-	// 	var appPath string
-
-	// 	BeforeEach(func() {
-	// 		appPath = filepath.Join(fixturesDir, "example-app")
-
-	// 		// the executable bit is the only bit we care about here
-	// 		err := os.Chmod(filepath.Join(appPath, "Gemfile"), 0467)
-	// 		Expect(err).NotTo(HaveOccurred())
-	// 	})
-
-	// 	AfterEach(func() {
-	// 		os.Chmod(filepath.Join(appPath, "Gemfile"), 0666)
-	// 	})
-
-	// It("preserves the executable bits when uploading app files", func() {
-	// 	apiErr := testUploadBits(defaultRequests...)
-	// 	Expect(apiErr).NotTo(HaveOccurred())
-
-	// 	Expect(reportedFilePath).To(Equal(appPath))
-	// 	Expect(reportedFileCount).To(Equal(int64(len(expectedApplicationContent))))
-	// 	Expect(reportedUploadSize).To(Equal(int64(532)))
-	// })
-
-	// PContext("when there are no files to upload", func() {
-	// It("makes a request without a zipfile", func() {
-	// 	emptyDir := filepath.Join(fixturesDir, "empty-dir")
-	// 	err := testUploadApp(
-	// 		testnet.TestRequest{
-	// 			Method:  "PUT",
-	// 			Path:    "/v2/resource_match",
-	// 			Matcher: testnet.RequestBodyMatcher("[]"),
-	// 			Response: testnet.TestResponse{
-	// 				Status: http.StatusOK,
-	// 				Body:   "[]",
-	// 			},
-	// 		},
-	// 		testapi.NewCloudControllerTestRequest(testnet.TestRequest{
-	// 			Method: "PUT",
-	// 			Path:   "/v2/apps/my-cool-app-guid/bits",
-	// 			Matcher: func(request *http.Request) {
-	// 				err := request.ParseMultipartForm(maxMultipartResponseSizeInBytes)
-	// 				Expect(err).NotTo(HaveOccurred())
-	// 				defer request.MultipartForm.RemoveAll()
-
-	// 				Expect(len(request.MultipartForm.Value)).To(Equal(1), "Should have 1 value")
-	// 				valuePart, ok := request.MultipartForm.Value["resources"]
-
-	// 				Expect(ok).To(BeTrue(), "Resource manifest not present")
-	// 				Expect(valuePart).To(Equal([]string{"[]"}))
-	// 				Expect(request.MultipartForm.File).To(BeEmpty())
-	// 			},
-	// 			Response: testnet.TestResponse{
-	// 				Status: http.StatusCreated,
-	// 				Body: `
-	// 					{
-	// 						"metadata":{
-	// 							"guid": "my-job-guid",
-	// 							"url": "/v2/jobs/my-job-guid"
-	// 						}
-	// 					}`,
-	// 			}}),
-	// 		createProgressEndpoint("running"),
-	// 		createProgressEndpoint("finished"),
-	// 	)
-
-	// 	Expect(err).NotTo(HaveOccurred())
-	// 	Expect(reportedFileCount).To(Equal(int64(0)))
-	// 	Expect(reportedUploadSize).To(Equal(int64(0)))
-	// 	Expect(reportedZipCount).To(Equal(-1))
-	// 	Expect(reportedFilePath).To(Equal(emptyDir))
-	// })
-	// })
-	// })
-
-	// PContext("when excluding a default ignored item", func() {
-	// var appPath string
-
-	// BeforeEach(func() {
-	// 	appPath = filepath.Join(fixturesDir, "exclude-a-default-cfignore")
-	// })
-
-	// It("includes the ignored item", func() {
-	// 	err := testUploadApp(appPath,
-	// 		matchExcludedResourceRequest,
-	// 		uploadApplicationRequest(func(zipReader *zip.Reader) {
-	// 			Expect(len(zipReader.File)).To(Equal(3), "Wrong number of files in zip")
-	// 		}),
-	// 		createProgressEndpoint("running"),
-	// 		createProgressEndpoint("finished"),
-	// 	)
-
-	// 	Expect(err).NotTo(HaveOccurred())
-	// 	Expect(reportedFileCount).To(Equal(int64(3)))
-	// 	Expect(reportedUploadSize).To(Equal(int64(354)))
-	// 	Expect(reportedZipCount).To(Equal(3))
-	// })
-	// })
+	Describe(".GetApplicationFiles", func() {
+		It("accepts a slice of files and returns a slice of the files that it already has", func() {
+			setupTestServer(matchResourceRequest)
+			matchedFiles, err := repo.GetApplicationFiles([]resources.AppFileResource{file1, file2, file3, file4})
+			Expect(matchedFiles).To(Equal([]resources.AppFileResource{file3, file4}))
+			Expect(err).NotTo(HaveOccurred())
+		})
+	})
 })
 
 var matchedResources = testnet.RemoveWhiteSpaceFromBody(`[
@@ -210,7 +145,7 @@ var matchedResources = testnet.RemoveWhiteSpaceFromBody(`[
         "fn": "Gemfile.lock",
         "sha1": "345f999aef9070fb9a608e65cf221b7038156b6d",
         "size": 229
-    },
+    }
 ]`)
 
 var unmatchedResources = testnet.RemoveWhiteSpaceFromBody(`[
@@ -248,6 +183,16 @@ var matchResourceRequest = testnet.TestRequest{
 	Method: "PUT",
 	Path:   "/v2/resource_match",
 	Matcher: testnet.RequestBodyMatcher(testnet.RemoveWhiteSpaceFromBody(`[
+	{
+        "fn": "app.rb",
+        "sha1": "2474735f5163ba7612ef641f438f4b5bee00127b",
+        "size": 51
+    },
+    {
+        "fn": "config.ru",
+        "sha1": "f097424ce1fa66c6cb9f5e8a18c317376ec12e05",
+        "size": 70
+    },
     {
         "fn": "Gemfile",
         "sha1": "d9c3a51de5c89c11331d3b90b972789f1a14699a",
@@ -257,16 +202,6 @@ var matchResourceRequest = testnet.TestRequest{
         "fn": "Gemfile.lock",
         "sha1": "345f999aef9070fb9a608e65cf221b7038156b6d",
         "size": 229
-    },
-    {
-        "fn": "app.rb",
-        "sha1": "2474735f5163ba7612ef641f438f4b5bee00127b",
-        "size": 51
-    },
-    {
-        "fn": "config.ru",
-        "sha1": "f097424ce1fa66c6cb9f5e8a18c317376ec12e05",
-        "size": 70
     }
 ]`)),
 	Response: testnet.TestResponse{
@@ -361,10 +296,6 @@ func uploadBodyMatcher(zipChecks func(zipReader *zip.Reader)) func(*http.Request
 	}
 }
 
-func executableBits(mode os.FileMode) os.FileMode {
-	return mode & 0111
-}
-
 func createProgressEndpoint(status string) (req testnet.TestRequest) {
 	body := fmt.Sprintf(`
 	{
@@ -409,28 +340,6 @@ var matchExcludedResourceRequest = testnet.TestRequest{
 	},
 }
 
-type countingZipper struct {
-	z    app_files.Zipper
-	size int
-}
-
-func (cz *countingZipper) Zip(dirToZip string, targetFile *os.File) error {
-	cz.size = -1
-	err := cz.z.Zip(dirToZip, targetFile)
-	if err != nil {
-		return err
-	}
-
-	r, err := zip.OpenReader(targetFile.Name())
-	if err != nil {
-		return err
-	}
-	defer r.Close()
-
-	cz.size = len(r.File)
-	return nil
-}
-
-func (cz *countingZipper) IsZipFile(path string) bool {
-	return cz.z.IsZipFile(path)
+func executableBits(mode os.FileMode) os.FileMode {
+	return mode & 0111
 }

@@ -14,7 +14,6 @@ import (
 	"github.com/cloudfoundry/cli/cf/configuration"
 	"github.com/cloudfoundry/cli/cf/errors"
 	. "github.com/cloudfoundry/cli/cf/i18n"
-	"github.com/cloudfoundry/cli/cf/models"
 	"github.com/cloudfoundry/cli/cf/net"
 	"github.com/cloudfoundry/gofileutils/fileutils"
 )
@@ -24,7 +23,7 @@ const (
 )
 
 type ApplicationBitsRepository interface {
-	GetApplicationFiles(appFilesRequest []models.AppFileFields) ([]models.AppFileFields, error)
+	GetApplicationFiles(appFilesRequest []resources.AppFileResource) ([]resources.AppFileResource, error)
 	UploadBits(appGuid string, zipFile *os.File, presentFiles []resources.AppFileResource) (apiErr error)
 }
 
@@ -78,14 +77,14 @@ func (repo CloudControllerApplicationBitsRepository) UploadBits(appGuid string, 
 	return
 }
 
-func (repo CloudControllerApplicationBitsRepository) GetApplicationFiles(appFilesRequest []models.AppFileFields) ([]models.AppFileFields, error) {
-	allAppFilesJson, err := json.Marshal(appFilesRequest)
+func (repo CloudControllerApplicationBitsRepository) GetApplicationFiles(appFilesToCheck []resources.AppFileResource) ([]resources.AppFileResource, error) {
+	allAppFilesJson, err := json.Marshal(appFilesToCheck)
 	if err != nil {
 		apiErr := errors.NewWithError(T("Failed to create json for resource_match request"), err)
 		return nil, apiErr
 	}
 
-	presentFiles := []models.AppFileFields{}
+	presentFiles := []resources.AppFileResource{}
 	apiErr := repo.gateway.UpdateResourceSync(
 		repo.config.ApiEndpoint()+"/v2/resource_match",
 		bytes.NewReader(allAppFilesJson),
