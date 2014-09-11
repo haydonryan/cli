@@ -40,10 +40,23 @@ func NewCloudControllerApplicationBitsRepository(config configuration.Reader, ga
 
 func (repo CloudControllerApplicationBitsRepository) UploadBits(appGuid string, zipFile *os.File, presentFiles []resources.AppFileResource) (apiErr error) {
 	url := fmt.Sprintf("%s/v2/apps/%s/bits", repo.config.ApiEndpoint(), appGuid)
+
+	fmt.Printf("#%v\n", *zipFile)
+	info, err := zipFile.Stat()
+	if err != nil {
+		println("ERROR: " + err.Error())
+	}
+	fmt.Printf("#%v\n", info.Size())
+
 	fileutils.TempFile("requests", func(requestFile *os.File, err error) {
 		if err != nil {
 			apiErr = errors.NewWithError(T("Error creating tmp file: {{.Err}}", map[string]interface{}{"Err": err}), err)
 			return
+		}
+
+		// json.Marshal represents a nil value as "null" instead of an empty slice "[]"
+		if presentFiles == nil {
+			presentFiles = []resources.AppFileResource{}
 		}
 
 		presentFilesJSON, err := json.Marshal(presentFiles)
@@ -68,6 +81,7 @@ func (repo CloudControllerApplicationBitsRepository) UploadBits(appGuid string, 
 		request.HttpReq.Header.Set("Content-Type", contentType)
 
 		response := &resources.Resource{}
+		fmt.Printf("%s\n", request.SeekableBody)
 		_, apiErr = repo.gateway.PerformPollingRequestForJSONResponse(request, response, DefaultAppUploadBitsTimeout)
 		if apiErr != nil {
 			return

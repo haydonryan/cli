@@ -121,6 +121,13 @@ var _ = Describe("Push Command", func() {
 		})
 	})
 
+	// Where does this test go?
+	It("calls UploadApp with a zip file", func() {
+		actor.UploadAppStub = func(appGuid string, zipFile *os.File, presentFiles []resources.AppFileResource) error {
+			Expect(zipFile).To(Equal(zipFileWeProvide))
+		}
+	})
+
 	Describe("when pushing a new app", func() {
 		BeforeEach(func() {
 			appRepo.ReadReturns.Error = errors.NewModelNotFoundError("App", "the-app")

@@ -4,42 +4,40 @@ package fakes
 import (
 	. "github.com/cloudfoundry/cli/cf/api/application_bits"
 	"github.com/cloudfoundry/cli/cf/api/resources"
-	"github.com/cloudfoundry/cli/cf/models"
-
 	"os"
 	"sync"
 )
 
 type FakeApplicationBitsRepository struct {
-	GetApplicationFilesStub        func(appFilesRequest []models.AppFileFields) ([]models.AppFileFields, error)
+	GetApplicationFilesStub        func(appFilesRequest []resources.AppFileResource) ([]resources.AppFileResource, error)
 	getApplicationFilesMutex       sync.RWMutex
 	getApplicationFilesArgsForCall []struct {
-		appFilesRequest []models.AppFileFields
+		arg1 []resources.AppFileResource
 	}
 	getApplicationFilesReturns struct {
-		result1 []models.AppFileFields
+		result1 []resources.AppFileResource
 		result2 error
 	}
 	UploadBitsStub        func(appGuid string, zipFile *os.File, presentFiles []resources.AppFileResource) (apiErr error)
 	uploadBitsMutex       sync.RWMutex
 	uploadBitsArgsForCall []struct {
-		appGuid      string
-		zipFile      *os.File
-		presentFiles []resources.AppFileResource
+		arg1 string
+		arg2 *os.File
+		arg3 []resources.AppFileResource
 	}
 	uploadBitsReturns struct {
 		result1 error
 	}
 }
 
-func (fake *FakeApplicationBitsRepository) GetApplicationFiles(appFilesRequest []models.AppFileFields) ([]models.AppFileFields, error) {
+func (fake *FakeApplicationBitsRepository) GetApplicationFiles(arg1 []resources.AppFileResource) ([]resources.AppFileResource, error) {
 	fake.getApplicationFilesMutex.Lock()
 	defer fake.getApplicationFilesMutex.Unlock()
 	fake.getApplicationFilesArgsForCall = append(fake.getApplicationFilesArgsForCall, struct {
-		appFilesRequest []models.AppFileFields
-	}{appFilesRequest})
+		arg1 []resources.AppFileResource
+	}{arg1})
 	if fake.GetApplicationFilesStub != nil {
-		return fake.GetApplicationFilesStub(appFilesRequest)
+		return fake.GetApplicationFilesStub(arg1)
 	} else {
 		return fake.getApplicationFilesReturns.result1, fake.getApplicationFilesReturns.result2
 	}
@@ -51,29 +49,29 @@ func (fake *FakeApplicationBitsRepository) GetApplicationFilesCallCount() int {
 	return len(fake.getApplicationFilesArgsForCall)
 }
 
-func (fake *FakeApplicationBitsRepository) GetApplicationFilesArgsForCall(i int) []models.AppFileFields {
+func (fake *FakeApplicationBitsRepository) GetApplicationFilesArgsForCall(i int) []resources.AppFileResource {
 	fake.getApplicationFilesMutex.RLock()
 	defer fake.getApplicationFilesMutex.RUnlock()
-	return fake.getApplicationFilesArgsForCall[i].appFilesRequest
+	return fake.getApplicationFilesArgsForCall[i].arg1
 }
 
-func (fake *FakeApplicationBitsRepository) GetApplicationFilesReturns(result1 []models.AppFileFields, result2 error) {
+func (fake *FakeApplicationBitsRepository) GetApplicationFilesReturns(result1 []resources.AppFileResource, result2 error) {
 	fake.getApplicationFilesReturns = struct {
-		result1 []models.AppFileFields
+		result1 []resources.AppFileResource
 		result2 error
 	}{result1, result2}
 }
 
-func (fake *FakeApplicationBitsRepository) UploadBits(appGuid string, zipFile *os.File, presentFiles []resources.AppFileResource) (apiErr error) {
+func (fake *FakeApplicationBitsRepository) UploadBits(arg1 string, arg2 *os.File, arg3 []resources.AppFileResource) (apiErr error) {
 	fake.uploadBitsMutex.Lock()
 	defer fake.uploadBitsMutex.Unlock()
 	fake.uploadBitsArgsForCall = append(fake.uploadBitsArgsForCall, struct {
-		appGuid      string
-		zipFile      *os.File
-		presentFiles []resources.AppFileResource
-	}{appGuid, zipFile, presentFiles})
+		arg1 string
+		arg2 *os.File
+		arg3 []resources.AppFileResource
+	}{arg1, arg2, arg3})
 	if fake.UploadBitsStub != nil {
-		return fake.UploadBitsStub(appGuid, zipFile, presentFiles)
+		return fake.UploadBitsStub(arg1, arg2, arg3)
 	} else {
 		return fake.uploadBitsReturns.result1
 	}
@@ -88,7 +86,7 @@ func (fake *FakeApplicationBitsRepository) UploadBitsCallCount() int {
 func (fake *FakeApplicationBitsRepository) UploadBitsArgsForCall(i int) (string, *os.File, []resources.AppFileResource) {
 	fake.uploadBitsMutex.RLock()
 	defer fake.uploadBitsMutex.RUnlock()
-	return fake.uploadBitsArgsForCall[i].appGuid, fake.uploadBitsArgsForCall[i].zipFile, fake.uploadBitsArgsForCall[i].presentFiles
+	return fake.uploadBitsArgsForCall[i].arg1, fake.uploadBitsArgsForCall[i].arg2, fake.uploadBitsArgsForCall[i].arg3
 }
 
 func (fake *FakeApplicationBitsRepository) UploadBitsReturns(result1 error) {

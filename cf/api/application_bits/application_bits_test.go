@@ -123,6 +123,80 @@ var _ = Describe("CloudControllerApplicationBitsRepository", func() {
 
 			Expect(apiErr).To(HaveOccurred())
 		})
+
+		Context("when there are no files to upload", func() {
+			It("makes a request without a zipfile", func() {
+				setupTestServer(
+					testapi.NewCloudControllerTestRequest(testnet.TestRequest{
+						Method: "PUT",
+						Path:   "/v2/apps/my-cool-app-guid/bits",
+						Matcher: func(request *http.Request) {
+							err := request.ParseMultipartForm(maxMultipartResponseSizeInBytes)
+							Expect(err).NotTo(HaveOccurred())
+							defer request.MultipartForm.RemoveAll()
+
+							Expect(len(request.MultipartForm.Value)).To(Equal(1), "Should have 1 value")
+							valuePart, ok := request.MultipartForm.Value["resources"]
+
+							Expect(ok).To(BeTrue(), "Resource manifest not present")
+							Expect(valuePart).To(Equal([]string{"[]"}))
+							Expect(request.MultipartForm.File).To(BeEmpty())
+						},
+						Response: testnet.TestResponse{
+							Status: http.StatusCreated,
+							Body: `
+					{
+						"metadata":{
+							"guid": "my-job-guid",
+							"url": "/v2/jobs/my-job-guid"
+						}
+					}`,
+						},
+					}),
+					createProgressEndpoint("running"),
+					createProgressEndpoint("finished"),
+				)
+
+				apiErr := repo.UploadBits("my-cool-app-guid", nil, []resources.AppFileResource{})
+				Expect(apiErr).NotTo(HaveOccurred())
+			})
+		})
+
+		It("marshals a nil presentFiles parameter into an empty array", func() {
+			setupTestServer(
+				testapi.NewCloudControllerTestRequest(testnet.TestRequest{
+					Method: "PUT",
+					Path:   "/v2/apps/my-cool-app-guid/bits",
+					Matcher: func(request *http.Request) {
+						err := request.ParseMultipartForm(maxMultipartResponseSizeInBytes)
+						Expect(err).NotTo(HaveOccurred())
+						defer request.MultipartForm.RemoveAll()
+
+						Expect(len(request.MultipartForm.Value)).To(Equal(1), "Should have 1 value")
+						valuePart, ok := request.MultipartForm.Value["resources"]
+
+						Expect(ok).To(BeTrue(), "Resource manifest not present")
+						Expect(valuePart).To(Equal([]string{"[]"}))
+						Expect(request.MultipartForm.File).To(BeEmpty())
+					},
+					Response: testnet.TestResponse{
+						Status: http.StatusCreated,
+						Body: `
+					{
+						"metadata":{
+							"guid": "my-job-guid",
+							"url": "/v2/jobs/my-job-guid"
+						}
+					}`,
+					},
+				}),
+				createProgressEndpoint("running"),
+				createProgressEndpoint("finished"),
+			)
+
+			apiErr := repo.UploadBits("my-cool-app-guid", nil, nil)
+			Expect(apiErr).NotTo(HaveOccurred())
+		})
 	})
 
 	Describe(".GetApplicationFiles", func() {

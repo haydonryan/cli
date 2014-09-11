@@ -2,13 +2,12 @@ package application
 
 import (
 	"fmt"
+	. "github.com/cloudfoundry/cli/cf/i18n"
+	"github.com/cloudfoundry/cli/fileutils"
 	"os"
 	"regexp"
 	"strconv"
 	"strings"
-	"time"
-	. "github.com/cloudfoundry/cli/cf/i18n"
-	"github.com/cloudfoundry/cli/fileutils"
 
 	"github.com/cloudfoundry/cli/cf/actors"
 	"github.com/cloudfoundry/cli/cf/api"
@@ -551,48 +550,38 @@ func (cmd *Push) uploadApp(appGuid string, appDir string) (apiErr error) {
 			return
 		}
 
-		zipFile, err := cmd.zipAppFiles(appDir, uploadDir)
-		if err != nil {
-			apiErr = err
-			return
-		}
+		fileutils.TempFile("uploads", func(zipFile *os.File, err error) {
+			err = cmd.zipAppFiles(zipFile, appDir, uploadDir)
+			if err != nil {
+				apiErr = err
+				return
+			}
 
-		err = cmd.actor.UploadApp(appGuid, zipFile, presentFiles)
-		if err != nil {
-			apiErr = err
-			return
-		}
+			err = cmd.actor.UploadApp(appGuid, zipFile, presentFiles)
+			if err != nil {
+				apiErr = err
+				return
+			}
+		})
+		return
 	})
 	return
 }
 
-func (cmd *Push) zipAppFiles(appDir string, uploadDir string) (zipFile *os.File, zipErr error) {
-	fileutils.TempFile("uploads", func(zipFile *os.File, err error) {
-		if err != nil {
-			zipErr = err
-			return
-		}
-
-		err = cmd.zipWithBetterErrors(uploadDir, zipFile)
-		if err != nil {
-			zipErr = err
-			return
-		}
-
-		zipFileSize, err := cmd.zipper.GetZipSize(zipFile)
-		if err != nil {
-			zipErr = err
-			return
-		}
-
-		zipFileCount := cmd.app_files.CountFiles(uploadDir)
-
-		cmd.describeUploadOperation(appDir, zipFileSize, zipFileCount)
-		filename, _ := zipFile.Stat()
-		println(os.TempDir() + filename.Name())
-		time.Sleep(60 * time.Second)
+func (cmd *Push) zipAppFiles(zipFile *os.File, appDir string, uploadDir string) (zipErr error) {
+	zipErr = cmd.zipWithBetterErrors(uploadDir, zipFile)
+	if zipErr != nil {
 		return
-	})
+	}
+
+	zipFileSize, zipErr := cmd.zipper.GetZipSize(zipFile)
+	if zipErr != nil {
+		return
+	}
+
+	zipFileCount := cmd.app_files.CountFiles(uploadDir)
+
+	cmd.describeUploadOperation(appDir, zipFileSize, zipFileCount)
 	return
 }
 

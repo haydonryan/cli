@@ -1,34 +1,137 @@
 package actors_test
 
 import (
+	"errors"
+	"github.com/cloudfoundry/cli/cf/actors"
+	fakeBits "github.com/cloudfoundry/cli/cf/api/application_bits/fakes"
+	"github.com/cloudfoundry/cli/cf/api/resources"
+	"github.com/cloudfoundry/cli/cf/app_files/fakes"
+	"github.com/cloudfoundry/cli/cf/models"
+	"github.com/cloudfoundry/gofileutils/fileutils"
 	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/gomega"
 	"os"
-	//	. "github.com/onsi/gomega"
+	"path/filepath"
 )
 
 var _ = Describe("Push Actor", func() {
+	var (
+		appBitsRepo  *fakeBits.FakeApplicationBitsRepository
+		appFiles     *fakes.FakeAppFiles
+		zipper       *fakes.FakeZipper
+		actor        actors.PushActor
+		fixturesDir  string
+		appDir       string
+		allFiles     []models.AppFileFields
+		presentFiles []resources.AppFileResource
+	)
+
+	BeforeEach(func() {
+		appBitsRepo = &fakeBits.FakeApplicationBitsRepository{}
+		appFiles = &fakes.FakeAppFiles{}
+		zipper = &fakes.FakeZipper{}
+		actor = actors.NewPushActor(appBitsRepo, zipper, appFiles)
+		fixturesDir = filepath.Join("..", "..", "fixtures", "applications")
+	})
+
 	Describe("GatherFiles", func() {
 		BeforeEach(func() {
+			allFiles = []models.AppFileFields{
+				models.AppFileFields{Path: "example-app/.cfignore"},
+				models.AppFileFields{Path: "example-app/app.rb"},
+				models.AppFileFields{Path: "example-app/config.ru"},
+				models.AppFileFields{Path: "example-app/Gemfile"},
+				models.AppFileFields{Path: "example-app/Gemfile.lock"},
+				models.AppFileFields{Path: "example-app/ignore-me"},
+				models.AppFileFields{Path: "example-app/manifest.yml"},
+			}
 
+			presentFiles = []resources.AppFileResource{
+				resources.AppFileResource{Path: "example-app/ignore-me"},
+			}
+
+			appDir = filepath.Join(fixturesDir, "example-app.zip")
+			zipper.UnzipReturns(nil)
+			appFiles.AppFilesInDirReturns(allFiles, nil)
+			appBitsRepo.GetApplicationFilesReturns(presentFiles, nil)
 		})
 
 		AfterEach(func() {
 		})
 
 		Context("when the input is a zipfile", func() {
-			It("extracts the zip", func() {
-
+			BeforeEach(func() {
+				zipper.IsZipFileReturns(true)
 			})
 
-			It("copies the files into the upload dir", func() {
-
+			It("extracts the zip", func() {
+				fileutils.TempDir("gather-files", func(tmpDir string, err error) {
+					files, err := actor.GatherFiles(appDir, tmpDir)
+					Expect(zipper.UnzipCallCount()).To(Equal(1))
+					Expect(err).NotTo(HaveOccurred())
+					Expect(files).To(Equal(presentFiles))
+				})
 			})
 
 		})
 
 		Context("when the input is a directory full of files", func() {
-			It("copies the files into the upload dir", func() {
+			BeforeEach(func() {
+				zipper.IsZipFileReturns(false)
+			})
 
+			It("does not try to unzip the directory", func() {
+				fileutils.TempDir("gather-files", func(tmpDir string, err error) {
+					files, err := actor.GatherFiles(appDir, tmpDir)
+					Expect(zipper.UnzipCallCount()).To(Equal(0))
+					Expect(err).NotTo(HaveOccurred())
+					Expect(files).To(Equal(presentFiles))
+				})
+			})
+		})
+
+		Context("when errors occur", func() {
+			It("returns an error if it cannot unzip the files", func() {
+				fileutils.TempDir("gather-files", func(tmpDir string, err error) {
+					zipper.IsZipFileReturns(true)
+					zipper.UnzipReturns(errors.New("error"))
+					_, err = actor.GatherFiles(appDir, tmpDir)
+					Expect(err).To(HaveOccurred())
+				})
+			})
+
+			It("returns an error if it cannot walk the files", func() {
+				fileutils.TempDir("gather-files", func(tmpDir string, err error) {
+					appFiles.AppFilesInDirReturns(nil, errors.New("error"))
+					_, err = actor.GatherFiles(appDir, tmpDir)
+					Expect(err).To(HaveOccurred())
+				})
+			})
+
+			It("returns an error if we cannot reach the cc", func() {
+				fileutils.TempDir("gather-files", func(tmpDir string, err error) {
+					appBitsRepo.GetApplicationFilesReturns(nil, errors.New("error"))
+					_, err = actor.GatherFiles(appDir, tmpDir)
+					Expect(err).To(HaveOccurred())
+				})
+			})
+		})
+
+		Context("when using .cfignore", func() {
+			BeforeEach(func() {
+				appBitsRepo.GetApplicationFilesReturns(nil, nil)
+				appDir = filepath.Join(fixturesDir, "exclude-a-default-cfignore")
+			})
+
+			It("includes the .cfignore file in the upload directory", func() {
+				fileutils.TempDir("gather-files", func(tmpDir string, err error) {
+					files, err := actor.GatherFiles(appDir, tmpDir)
+					Expect(err).NotTo(HaveOccurred())
+
+					_, err = os.Stat(filepath.Join(tmpDir, ".cfignore"))
+					Expect(os.IsNotExist(err)).To(BeFalse())
+					Expect(len(files)).To(Equal(0))
+				})
 			})
 		})
 	})
@@ -74,79 +177,6 @@ var _ = Describe("Push Actor", func() {
 // 	Expect(reportedUploadSize).To(Equal(int64(532)))
 // })
 
-// PContext("when there are no files to upload", func() {
-// It("makes a request without a zipfile", func() {
-// 	emptyDir := filepath.Join(fixturesDir, "empty-dir")
-// 	err := testUploadApp(
-// 		testnet.TestRequest{
-// 			Method:  "PUT",
-// 			Path:    "/v2/resource_match",
-// 			Matcher: testnet.RequestBodyMatcher("[]"),
-// 			Response: testnet.TestResponse{
-// 				Status: http.StatusOK,
-// 				Body:   "[]",
-// 			},
-// 		},
-// 		testapi.NewCloudControllerTestRequest(testnet.TestRequest{
-// 			Method: "PUT",
-// 			Path:   "/v2/apps/my-cool-app-guid/bits",
-// 			Matcher: func(request *http.Request) {
-// 				err := request.ParseMultipartForm(maxMultipartResponseSizeInBytes)
-// 				Expect(err).NotTo(HaveOccurred())
-// 				defer request.MultipartForm.RemoveAll()
-
-// 				Expect(len(request.MultipartForm.Value)).To(Equal(1), "Should have 1 value")
-// 				valuePart, ok := request.MultipartForm.Value["resources"]
-
-// 				Expect(ok).To(BeTrue(), "Resource manifest not present")
-// 				Expect(valuePart).To(Equal([]string{"[]"}))
-// 				Expect(request.MultipartForm.File).To(BeEmpty())
-// 			},
-// 			Response: testnet.TestResponse{
-// 				Status: http.StatusCreated,
-// 				Body: `
-// 					{
-// 						"metadata":{
-// 							"guid": "my-job-guid",
-// 							"url": "/v2/jobs/my-job-guid"
-// 						}
-// 					}`,
-// 			}}),
-// 		createProgressEndpoint("running"),
-// 		createProgressEndpoint("finished"),
-// 	)
-
-// 	Expect(err).NotTo(HaveOccurred())
-// 	Expect(reportedFileCount).To(Equal(int64(0)))
-// 	Expect(reportedUploadSize).To(Equal(int64(0)))
-// 	Expect(reportedZipCount).To(Equal(-1))
-// 	Expect(reportedFilePath).To(Equal(emptyDir))
-// })
-// })
-// })
-
-// PContext("when excluding a default ignored item", func() {
-// var appPath string
-
-// BeforeEach(func() {
-// 	appPath = filepath.Join(fixturesDir, "exclude-a-default-cfignore")
-// })
-
-// It("includes the ignored item", func() {
-// 	err := testUploadApp(appPath,
-// 		matchExcludedResourceRequest,
-// 		uploadApplicationRequest(func(zipReader *zip.Reader) {
-// 			Expect(len(zipReader.File)).To(Equal(3), "Wrong number of files in zip")
-// 		}),
-// 		createProgressEndpoint("running"),
-// 		createProgressEndpoint("finished"),
-// 	)
-
-// 	Expect(err).NotTo(HaveOccurred())
-// 	Expect(reportedFileCount).To(Equal(int64(3)))
-// 	Expect(reportedUploadSize).To(Equal(int64(354)))
-// 	Expect(reportedZipCount).To(Equal(3))
-// })
 // })
 
 func executableBits(mode os.FileMode) os.FileMode {
